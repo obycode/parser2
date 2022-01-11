@@ -106,7 +106,7 @@ impl<'a> Lexer<'a> {
             self.read_char();
 
             let f = self.next;
-            if f == '\0' || f.is_whitespace() {
+            if !f.is_ascii_hexdigit() {
                 break;
             }
 
@@ -441,7 +441,13 @@ mod tests {
         assert_eq!(lexer.read_token().token, Token::Invalid);
 
         lexer = Lexer::new("0x00p5");
-        assert_eq!(lexer.read_token().token, Token::Invalid);
+        if let Token::Bytes(v) = lexer.read_token().token {
+            assert_eq!(v.len(), 1);
+            assert_eq!(v[0], 0x0);
+        } else {
+            assert!(false);
+        }
+        assert_eq!(lexer.read_token().token, Token::Ident("p5".to_string()));
 
         lexer = Lexer::new("0xdef0 ");
         if let Token::Bytes(v) = lexer.read_token().token {
