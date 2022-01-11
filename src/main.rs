@@ -1,6 +1,6 @@
 mod lexer;
 use crate::lexer::token::Token;
-use std::io::{self, BufRead, Read};
+use std::io::{self, Read};
 
 fn main() {
     let mut stdin = io::stdin();

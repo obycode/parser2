@@ -1,4 +1,4 @@
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Token {
     Eof,
     Whitespace,
@@ -11,8 +11,10 @@ pub enum Token {
     Dot,
     Int(i128),
     Uint(u128),
-    Buff(Vec<char>),
-    Ident(Vec<char>),
+    AsciiString(String),
+    Utf8String(String),
+    Bytes(Vec<u8>),
+    Ident(String),
     Plus,
     Minus,
     Multiply,
@@ -21,7 +23,7 @@ pub enum Token {
     LessEqual,
     Greater,
     GreaterEqual,
-    Comment(Vec<char>),
+    Comment(String),
     Invalid,
 }
 
