@@ -27,6 +27,7 @@ pub enum Token {
     Invalid,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Span {
     pub start_line: u32,
     pub start_column: u32,

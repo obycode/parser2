@@ -9,6 +9,8 @@ pub struct Lexer<'a> {
     offset: usize,
     pub line: usize,
     pub column: usize,
+    pub last_line: usize,
+    pub last_column: usize
 }
 
 impl<'a> Lexer<'a> {
@@ -19,12 +21,17 @@ impl<'a> Lexer<'a> {
             offset: 0,
             line: 1,
             column: 0,
+            last_line: 0,
+            last_column: 0,
         };
         s.read_char();
         s
     }
 
     pub fn read_char(&mut self) {
+        self.last_line = self.line;
+        self.last_column = self.column;
+
         if self.next == '\n' {
             self.line = self.line + 1;
             self.column = 0;
@@ -53,7 +60,6 @@ impl<'a> Lexer<'a> {
         loop {
             match self.next {
                 '\n' => {
-                    self.read_char();
                     break;
                 }
                 '\0' => break,
@@ -143,7 +149,10 @@ impl<'a> Lexer<'a> {
                 escaped = false;
             } else {
                 match self.next {
-                    '"' => return Some(s),
+                    '"' => {
+                        self.read_char();
+                        return Some(s);
+                    }
                     '\\' => escaped = !escaped,
                     '\0' => return None,
                     _ => {
@@ -178,7 +187,10 @@ impl<'a> Lexer<'a> {
                 escaped = false;
             } else {
                 match self.next {
-                    '"' => return Some(s),
+                    '"' => {
+                        self.read_char();
+                        return Some(s);
+                    }
                     '\\' => escaped = !escaped,
                     '\0' => return None,
                     _ => {
@@ -232,6 +244,7 @@ impl<'a> Lexer<'a> {
                 if self.next != ';' {
                     Token::Invalid
                 } else {
+                    advance = false;
                     self.read_char();
                     self.skip_whitespace();
                     let comment = self.read_line();
@@ -298,8 +311,8 @@ impl<'a> Lexer<'a> {
             span: Span {
                 start_line,
                 start_column,
-                end_line: self.line as u32,
-                end_column: (self.column - 1) as u32,
+                end_line: self.last_line as u32,
+                end_column: self.last_column as u32,
             },
             token,
         }
@@ -521,5 +534,444 @@ mod tests {
         assert_eq!(lexer.read_token().token, Token::Int(321));
         assert_eq!(lexer.read_token().token, Token::Eof);
         assert_eq!(lexer.read_token().token, Token::Eof);
+    }
+
+    #[test]
+    fn check_span() {
+        let mut lexer = Lexer::new(
+            r#"
+ (foo)
+    }1234abc{
+        +-*/    < <=       >
+>=.: ;; comment
+   "hello" u"world"     0x0123456789abcdeffedcba9876543210
+	
+
+   foo-bar_
+"#,
+        );
+        let mut token = lexer.read_token();
+        assert_eq!(token.token, Token::Whitespace);
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 1,
+                start_column: 1,
+                end_line: 2,
+                end_column: 1
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::Lparen);
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 2,
+                start_column: 2,
+                end_line: 2,
+                end_column: 2
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::Ident("foo".to_string()));
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 2,
+                start_column: 3,
+                end_line: 2,
+                end_column: 5
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::Rparen);
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 2,
+                start_column: 6,
+                end_line: 2,
+                end_column: 6
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::Whitespace);
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 2,
+                start_column: 7,
+                end_line: 3,
+                end_column: 4
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::Rbrace);
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 3,
+                start_column: 5,
+                end_line: 3,
+                end_column: 5
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::Int(1234));
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 3,
+                start_column: 6,
+                end_line: 3,
+                end_column: 9
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::Ident("abc".to_string()));
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 3,
+                start_column: 10,
+                end_line: 3,
+                end_column: 12
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::Lbrace);
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 3,
+                start_column: 13,
+                end_line: 3,
+                end_column: 13
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::Whitespace);
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 3,
+                start_column: 14,
+                end_line: 4,
+                end_column: 8
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::Plus);
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 4,
+                start_column: 9,
+                end_line: 4,
+                end_column: 9
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::Minus);
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 4,
+                start_column: 10,
+                end_line: 4,
+                end_column: 10
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::Multiply);
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 4,
+                start_column: 11,
+                end_line: 4,
+                end_column: 11
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::Divide);
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 4,
+                start_column: 12,
+                end_line: 4,
+                end_column: 12
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::Whitespace);
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 4,
+                start_column: 13,
+                end_line: 4,
+                end_column: 16
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::Less);
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 4,
+                start_column: 17,
+                end_line: 4,
+                end_column: 17
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::Whitespace);
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 4,
+                start_column: 18,
+                end_line: 4,
+                end_column: 18
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::LessEqual);
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 4,
+                start_column: 19,
+                end_line: 4,
+                end_column: 20
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::Whitespace);
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 4,
+                start_column: 21,
+                end_line: 4,
+                end_column: 27
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::Greater);
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 4,
+                start_column: 28,
+                end_line: 4,
+                end_column: 28
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::Whitespace);
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 4,
+                start_column: 29,
+                end_line: 4,
+                end_column: 29
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::GreaterEqual);
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 5,
+                start_column: 1,
+                end_line: 5,
+                end_column: 2
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::Dot);
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 5,
+                start_column: 3,
+                end_line: 5,
+                end_column: 3
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::Colon);
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 5,
+                start_column: 4,
+                end_line: 5,
+                end_column: 4
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::Whitespace);
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 5,
+                start_column: 5,
+                end_line: 5,
+                end_column: 5
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::Comment("comment".to_string()));
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 5,
+                start_column: 6,
+                end_line: 5,
+                end_column: 15
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::Whitespace);
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 5,
+                start_column: 16,
+                end_line: 6,
+                end_column: 3
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::AsciiString("hello".to_string()));
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 6,
+                start_column: 4,
+                end_line: 6,
+                end_column: 10
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::Whitespace);
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 6,
+                start_column: 11,
+                end_line: 6,
+                end_column: 11
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::Utf8String("world".to_string()));
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 6,
+                start_column: 12,
+                end_line: 6,
+                end_column: 19
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::Whitespace);
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 6,
+                start_column: 20,
+                end_line: 6,
+                end_column: 24
+            }
+        );
+
+        token = lexer.read_token();
+        if let Token::Bytes(v) = token.token {
+            assert_eq!(v.len(), 16);
+        } else {
+            assert!(false);
+        }
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 6,
+                start_column: 25,
+                end_line: 6,
+                end_column: 58
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::Whitespace);
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 6,
+                start_column: 59,
+                end_line: 9,
+                end_column: 3
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::Ident("foo-bar_".to_string()));
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 9,
+                start_column: 4,
+                end_line: 9,
+                end_column: 11
+            }
+        );
+
+        token = lexer.read_token();
+        assert_eq!(token.token, Token::Whitespace);
+        assert_eq!(
+            token.span,
+            Span {
+                start_line: 9,
+                start_column: 12,
+                end_line: 9,
+                end_column: 12
+            }
+        );
     }
 }
