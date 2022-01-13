@@ -1,3 +1,5 @@
+use super::error::LexerError;
+
 #[derive(Debug, PartialEq)]
 pub enum Token {
     Eof,
@@ -24,7 +26,8 @@ pub enum Token {
     Greater,
     GreaterEqual,
     Comment(String),
-    Invalid,
+    Error(LexerError),
+    Placeholder, // used to continue parsing after errors
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

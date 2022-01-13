@@ -1,7 +1,10 @@
+pub mod error;
 pub mod token;
 
 use std::{char, str::Chars};
 use token::{PlacedToken, Span, Token};
+
+use crate::lexer::error::LexerError;
 
 pub struct Lexer<'a> {
     input: Chars<'a>,
@@ -10,7 +13,16 @@ pub struct Lexer<'a> {
     pub line: usize,
     pub column: usize,
     pub last_line: usize,
-    pub last_column: usize
+    pub last_column: usize,
+    // While lexing, collect errors and continue on (when possible)
+    errors: Vec<PlacedToken>,
+}
+
+fn is_separator(ch: char) -> bool {
+    match ch {
+        '(' | ')' | '{' | '}' | ',' | ':' | '\0' => true,
+        _ => ch.is_ascii_whitespace(),
+    }
 }
 
 impl<'a> Lexer<'a> {
@@ -23,8 +35,9 @@ impl<'a> Lexer<'a> {
             column: 0,
             last_line: 0,
             last_column: 0,
+            errors: vec![],
         };
-        s.read_char();
+        s.read_char(); // Initialize with the first character
         s
     }
 
@@ -71,6 +84,23 @@ impl<'a> Lexer<'a> {
         line
     }
 
+    fn proceed_through_error(&mut self, err: LexerError) {
+        let start_line = self.line as u32;
+        let start_column = self.column as u32;
+        while !is_separator(self.next) {
+            self.read_char();
+        }
+        self.errors.push(PlacedToken {
+            span: Span {
+                start_line,
+                start_column,
+                end_line: self.last_line as u32,
+                end_column: self.last_column as u32,
+            },
+            token: Token::Error(err),
+        });
+    }
+
     pub fn read_identifier(&mut self, first: Option<char>) -> String {
         let mut ident = String::new();
         if let Some(first) = first {
@@ -80,7 +110,14 @@ impl<'a> Lexer<'a> {
         loop {
             match self.next {
                 'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '-' | '!' | '?' => ident.push(self.next),
-                _ => return ident,
+                _ => {
+                    if is_separator(self.next) {
+                        return ident;
+                    } else {
+                        self.proceed_through_error(LexerError::InvalidCharIdent(self.next));
+                        return ident;
+                    }
+                }
             }
             self.read_char();
         }
@@ -93,6 +130,9 @@ impl<'a> Lexer<'a> {
             num = num * 10 + digit as u128;
             self.read_char();
         }
+        if !is_separator(self.next) {
+            self.proceed_through_error(LexerError::InvalidCharUint(self.next));
+        }
         num
     }
 
@@ -103,34 +143,53 @@ impl<'a> Lexer<'a> {
             num = num * 10 + digit as i128;
             self.read_char();
         }
+        if !is_separator(self.next) {
+            self.proceed_through_error(LexerError::InvalidCharInt(self.next));
+        }
         num
     }
 
-    pub fn read_hex(&mut self) -> Option<Vec<u8>> {
+    pub fn read_hex(&mut self) -> Vec<u8> {
+        let start_line = self.line as u32;
+        let start_column = (self.column - 1) as u32;
         let mut bytes = vec![];
         loop {
             self.read_char();
 
             let f = self.next;
             if !f.is_ascii_hexdigit() {
-                break;
+                if !is_separator(f) {
+                    self.proceed_through_error(LexerError::InvalidCharBuffer(f));
+                }
+                return bytes;
             }
 
             self.read_char();
             let s = self.next;
-
-            match (f.to_digit(16), s.to_digit(16)) {
-                (None, _) => return None, //Err(HexError::BadCharacter(f)),
-                (_, None) => return None, //Err(HexError::BadCharacter(s)),
-                (Some(f), Some(s)) => {
-                    bytes.push((f * 0x10 + s) as u8);
+            if !s.is_ascii_hexdigit() {
+                if is_separator(s) {
+                    self.errors.push(PlacedToken {
+                        span: Span {
+                            start_line,
+                            start_column,
+                            end_line: self.last_line as u32,
+                            end_column: self.last_column as u32,
+                        },
+                        token: Token::Error(LexerError::InvalidBufferLength(bytes.len() * 2 + 1)),
+                    });
+                } else {
+                    self.proceed_through_error(LexerError::InvalidCharBuffer(s));
                 }
+                return bytes;
             }
+
+            bytes.push((f.to_digit(16).unwrap() * 0x10 + s.to_digit(16).unwrap()) as u8);
         }
-        Some(bytes)
     }
 
-    pub fn read_ascii_string(&mut self) -> Option<String> {
+    pub fn read_ascii_string(&mut self) -> String {
+        let start_line = self.line as u32;
+        let start_column = self.column as u32;
         let mut s = String::new();
         let mut escaped = false;
         self.read_char();
@@ -143,7 +202,18 @@ impl<'a> Lexer<'a> {
                     't' => '\t',
                     'r' => '\r',
                     '0' => '\0',
-                    _ => return None,
+                    _ => {
+                        self.errors.push(PlacedToken {
+                            span: Span {
+                                start_line: self.last_line as u32,
+                                start_column: self.last_column as u32,
+                                end_line: self.line as u32,
+                                end_column: self.column as u32,
+                            },
+                            token: Token::Error(LexerError::UnknownEscapeChar(self.next)),
+                        });
+                        '�'
+                    }
                 };
                 s.push(ch);
                 escaped = false;
@@ -151,13 +221,32 @@ impl<'a> Lexer<'a> {
                 match self.next {
                     '"' => {
                         self.read_char();
-                        return Some(s);
+                        return s;
                     }
                     '\\' => escaped = !escaped,
-                    '\0' => return None,
+                    '\0' => {
+                        self.errors.push(PlacedToken {
+                            span: Span {
+                                start_line: start_line,
+                                start_column: start_column,
+                                end_line: self.last_line as u32,
+                                end_column: self.last_column as u32,
+                            },
+                            token: Token::Error(LexerError::UnterminatedString),
+                        });
+                        return s;
+                    }
                     _ => {
                         if !self.next.is_ascii() {
-                            return None;
+                            self.errors.push(PlacedToken {
+                                span: Span {
+                                    start_line: self.line as u32,
+                                    start_column: self.column as u32,
+                                    end_line: self.line as u32,
+                                    end_column: self.column as u32,
+                                },
+                                token: Token::Error(LexerError::IllegalCharString(self.next)),
+                            });
                         }
                         escaped = false;
                         s.push(self.next);
@@ -168,7 +257,9 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    pub fn read_utf8_string(&mut self) -> Option<String> {
+    pub fn read_utf8_string(&mut self) -> String {
+        let start_line = self.last_line as u32;
+        let start_column = self.last_column as u32;
         let mut s = String::new();
         let mut escaped = false;
         self.read_char();
@@ -182,17 +273,39 @@ impl<'a> Lexer<'a> {
                     'r' => s.push('\r'),
                     '0' => s.push('\0'),
                     'u' => s.push_str("\\u"),
-                    _ => return None,
+                    _ => {
+                        self.errors.push(PlacedToken {
+                            span: Span {
+                                start_line: self.last_line as u32,
+                                start_column: self.last_column as u32,
+                                end_line: self.line as u32,
+                                end_column: self.column as u32,
+                            },
+                            token: Token::Error(LexerError::UnknownEscapeChar(self.next)),
+                        });
+                        s.push('�');
+                    }
                 };
                 escaped = false;
             } else {
                 match self.next {
                     '"' => {
                         self.read_char();
-                        return Some(s);
+                        return s;
                     }
                     '\\' => escaped = !escaped,
-                    '\0' => return None,
+                    '\0' => {
+                        self.errors.push(PlacedToken {
+                            span: Span {
+                                start_line,
+                                start_column,
+                                end_line: self.line as u32,
+                                end_column: self.column as u32,
+                            },
+                            token: Token::Error(LexerError::UnterminatedString),
+                        });
+                        return s;
+                    }
                     _ => {
                         escaped = false;
                         s.push(self.next);
@@ -242,14 +355,24 @@ impl<'a> Lexer<'a> {
             ';' => {
                 self.read_char();
                 if self.next != ';' {
-                    Token::Invalid
+                    // If there is just one ';', report an error but continue
+                    //  parsing as if there were two (a comment).
+                    self.errors.push(PlacedToken {
+                        span: Span {
+                            start_line: self.last_line as u32,
+                            start_column: self.last_column as u32,
+                            end_line: self.last_line as u32,
+                            end_column: self.last_column as u32,
+                        },
+                        token: Token::Error(LexerError::SingleSemiColon),
+                    });
                 } else {
-                    advance = false;
                     self.read_char();
-                    self.skip_whitespace();
-                    let comment = self.read_line();
-                    Token::Comment(comment)
                 }
+                advance = false;
+                self.skip_whitespace();
+                let comment = self.read_line();
+                Token::Comment(comment)
             }
             'u' => {
                 advance = false;
@@ -257,10 +380,7 @@ impl<'a> Lexer<'a> {
                 if self.next.is_ascii_digit() {
                     Token::Uint(self.read_unsigned())
                 } else if self.next == '"' {
-                    match self.read_utf8_string() {
-                        Some(s) => Token::Utf8String(s),
-                        None => Token::Invalid,
-                    }
+                    Token::Utf8String(self.read_utf8_string())
                 } else {
                     Token::Ident(self.read_identifier(Some('u')))
                 }
@@ -272,22 +392,19 @@ impl<'a> Lexer<'a> {
             }
             '"' => {
                 advance = false;
-                match self.read_ascii_string() {
-                    Some(s) => Token::AsciiString(s),
-                    None => Token::Invalid,
-                }
+                Token::AsciiString(self.read_ascii_string())
             }
             '0' => {
                 advance = false;
                 self.read_char();
                 if self.next == 'x' {
-                    match self.read_hex() {
-                        Some(v) => Token::Bytes(v),
-                        None => Token::Invalid,
-                    }
+                    Token::Bytes(self.read_hex())
                 } else if self.next.is_ascii_digit() {
                     Token::Int(self.read_integer())
+                } else if is_separator(self.next) {
+                    Token::Int(0)
                 } else {
+                    self.proceed_through_error(LexerError::InvalidCharInt(self.next));
                     Token::Int(0)
                 }
             }
@@ -298,7 +415,16 @@ impl<'a> Lexer<'a> {
                 } else if self.next.is_ascii_digit() {
                     Token::Int(self.read_integer())
                 } else {
-                    Token::Invalid
+                    self.errors.push(PlacedToken {
+                        span: Span {
+                            start_line: self.line as u32,
+                            start_column: self.column as u32,
+                            end_line: self.line as u32,
+                            end_column: self.column as u32,
+                        },
+                        token: Token::Error(LexerError::UnknownSymbol(self.next)),
+                    });
+                    Token::Placeholder
                 }
             }
         };
@@ -367,15 +493,35 @@ mod tests {
         lexer = Lexer::new("0123");
         assert_eq!(lexer.read_token().token, Token::Int(123));
 
+        lexer = Lexer::new("0");
+        assert_eq!(lexer.read_token().token, Token::Int(0));
+
         lexer = Lexer::new("0a");
         assert_eq!(lexer.read_token().token, Token::Int(0));
-        assert_eq!(lexer.read_token().token, Token::Ident("a".to_string()));
+        assert_eq!(lexer.errors.len(), 1);
+        assert_eq!(
+            lexer.errors[0].token,
+            Token::Error(LexerError::InvalidCharInt('a'))
+        );
 
-        lexer = Lexer::new("1a");
-        assert_eq!(lexer.read_token().token, Token::Int(1));
+        lexer = Lexer::new("56789*");
+        assert_eq!(lexer.read_token().token, Token::Int(56789));
+        assert_eq!(lexer.errors.len(), 1);
+        assert_eq!(
+            lexer.errors[0].token,
+            Token::Error(LexerError::InvalidCharInt('*'))
+        );
 
         lexer = Lexer::new("u123");
         assert_eq!(lexer.read_token().token, Token::Uint(123));
+
+        lexer = Lexer::new("u1a");
+        assert_eq!(lexer.read_token().token, Token::Uint(1));
+        assert_eq!(lexer.errors.len(), 1);
+        assert_eq!(
+            lexer.errors[0].token,
+            Token::Error(LexerError::InvalidCharUint('a'))
+        );
 
         lexer = Lexer::new("\"hello\"");
         assert_eq!(
@@ -402,16 +548,48 @@ mod tests {
         );
 
         lexer = Lexer::new("\"\\x\"");
-        assert_eq!(lexer.read_token().token, Token::Invalid);
+        assert_eq!(
+            lexer.read_token().token,
+            Token::AsciiString("�".to_string())
+        );
+        assert_eq!(lexer.errors.len(), 1);
+        assert_eq!(
+            lexer.errors[0].token,
+            Token::Error(LexerError::UnknownEscapeChar('x'))
+        );
 
         lexer = Lexer::new("\"open");
-        assert_eq!(lexer.read_token().token, Token::Invalid);
+        assert_eq!(
+            lexer.read_token().token,
+            Token::AsciiString("open".to_string())
+        );
+        assert_eq!(lexer.errors.len(), 1);
+        assert_eq!(
+            lexer.errors[0].token,
+            Token::Error(LexerError::UnterminatedString)
+        );
 
         lexer = Lexer::new("\"👎\"");
-        assert_eq!(lexer.read_token().token, Token::Invalid);
+        assert_eq!(
+            lexer.read_token().token,
+            Token::AsciiString("👎".to_string())
+        );
+        assert_eq!(lexer.errors.len(), 1);
+        assert_eq!(
+            lexer.errors[0].token,
+            Token::Error(LexerError::IllegalCharString('👎'))
+        );
 
         lexer = Lexer::new("\"\\u{1F600}\"");
-        assert_eq!(lexer.read_token().token, Token::Invalid);
+        assert_eq!(
+            lexer.read_token().token,
+            Token::AsciiString("�{1F600}".to_string())
+        );
+        assert_eq!(lexer.errors.len(), 1);
+        assert_eq!(
+            lexer.errors[0].token,
+            Token::Error(LexerError::UnknownEscapeChar('u'))
+        );
 
         lexer = Lexer::new("u\"\\u{1F600}\"");
         assert_eq!(
@@ -432,10 +610,23 @@ mod tests {
         );
 
         lexer = Lexer::new("u\"\\x\"");
-        assert_eq!(lexer.read_token().token, Token::Invalid);
+        assert_eq!(lexer.read_token().token, Token::Utf8String("�".to_string()));
+        assert_eq!(lexer.errors.len(), 1);
+        assert_eq!(
+            lexer.errors[0].token,
+            Token::Error(LexerError::UnknownEscapeChar('x'))
+        );
 
         lexer = Lexer::new("u\"open");
-        assert_eq!(lexer.read_token().token, Token::Invalid);
+        assert_eq!(
+            lexer.read_token().token,
+            Token::Utf8String("open".to_string())
+        );
+        assert_eq!(lexer.errors.len(), 1);
+        assert_eq!(
+            lexer.errors[0].token,
+            Token::Error(LexerError::UnterminatedString)
+        );
 
         lexer = Lexer::new("0x123abc");
         if let Token::Bytes(v) = lexer.read_token().token {
@@ -448,10 +639,30 @@ mod tests {
         }
 
         lexer = Lexer::new("0xdefg");
-        assert_eq!(lexer.read_token().token, Token::Invalid);
+        if let Token::Bytes(v) = lexer.read_token().token {
+            assert_eq!(v.len(), 1);
+            assert_eq!(v[0], 0xde);
+        } else {
+            assert!(false);
+        }
+        assert_eq!(lexer.errors.len(), 1);
+        assert_eq!(
+            lexer.errors[0].token,
+            Token::Error(LexerError::InvalidCharBuffer('g'))
+        );
 
         lexer = Lexer::new("0xdef");
-        assert_eq!(lexer.read_token().token, Token::Invalid);
+        if let Token::Bytes(v) = lexer.read_token().token {
+            assert_eq!(v.len(), 1);
+            assert_eq!(v[0], 0xde);
+        } else {
+            assert!(false);
+        }
+        assert_eq!(lexer.errors.len(), 1);
+        assert_eq!(
+            lexer.errors[0].token,
+            Token::Error(LexerError::InvalidBufferLength(3))
+        );
 
         lexer = Lexer::new("0x00p5");
         if let Token::Bytes(v) = lexer.read_token().token {
@@ -460,7 +671,11 @@ mod tests {
         } else {
             assert!(false);
         }
-        assert_eq!(lexer.read_token().token, Token::Ident("p5".to_string()));
+        assert_eq!(lexer.errors.len(), 1);
+        assert_eq!(
+            lexer.errors[0].token,
+            Token::Error(LexerError::InvalidCharBuffer('p'))
+        );
 
         lexer = Lexer::new("0xdef0 ");
         if let Token::Bytes(v) = lexer.read_token().token {
@@ -476,6 +691,14 @@ mod tests {
 
         lexer = Lexer::new("ubar");
         assert_eq!(lexer.read_token().token, Token::Ident("ubar".to_string()));
+
+        lexer = Lexer::new("baz👍buz");
+        assert_eq!(lexer.read_token().token, Token::Ident("baz".to_string()));
+        assert_eq!(lexer.errors.len(), 1);
+        assert_eq!(
+            lexer.errors[0].token,
+            Token::Error(LexerError::InvalidCharIdent('👍'))
+        );
 
         lexer = Lexer::new("+");
         assert_eq!(lexer.read_token().token, Token::Plus);
@@ -520,10 +743,23 @@ mod tests {
         );
 
         lexer = Lexer::new("; this is not a comment");
-        assert_eq!(lexer.read_token().token, Token::Invalid);
+        assert_eq!(
+            lexer.read_token().token,
+            Token::Comment("this is not a comment".to_string())
+        );
+        assert_eq!(lexer.errors.len(), 1);
+        assert_eq!(
+            lexer.errors[0].token,
+            Token::Error(LexerError::SingleSemiColon)
+        );
 
         lexer = Lexer::new("~");
-        assert_eq!(lexer.read_token().token, Token::Invalid);
+        assert_eq!(lexer.read_token().token, Token::Placeholder);
+        assert_eq!(lexer.errors.len(), 1);
+        assert_eq!(
+            lexer.errors[0].token,
+            Token::Error(LexerError::UnknownSymbol('~'))
+        );
     }
 
     #[test]
@@ -541,7 +777,7 @@ mod tests {
         let mut lexer = Lexer::new(
             r#"
  (foo)
-    }1234abc{
+    }1234{abc
         +-*/    < <=       >
 >=.: ;; comment
    "hello" u"world"     0x0123456789abcdeffedcba9876543210
@@ -635,24 +871,24 @@ mod tests {
         );
 
         token = lexer.read_token();
-        assert_eq!(token.token, Token::Ident("abc".to_string()));
+        assert_eq!(token.token, Token::Lbrace);
         assert_eq!(
             token.span,
             Span {
                 start_line: 3,
                 start_column: 10,
                 end_line: 3,
-                end_column: 12
+                end_column: 10
             }
         );
 
         token = lexer.read_token();
-        assert_eq!(token.token, Token::Lbrace);
+        assert_eq!(token.token, Token::Ident("abc".to_string()));
         assert_eq!(
             token.span,
             Span {
                 start_line: 3,
-                start_column: 13,
+                start_column: 11,
                 end_line: 3,
                 end_column: 13
             }
@@ -971,6 +1207,191 @@ mod tests {
                 start_column: 12,
                 end_line: 9,
                 end_column: 12
+            }
+        );
+    }
+
+    #[test]
+    fn check_error_span() {
+        let mut lexer = Lexer::new("0a 123");
+        lexer.read_token();
+        assert_eq!(
+            lexer.errors[0].span,
+            Span {
+                start_line: 1,
+                start_column: 2,
+                end_line: 1,
+                end_column: 2
+            }
+        );
+
+        lexer = Lexer::new("56789* foo");
+        lexer.read_token();
+        assert_eq!(
+            lexer.errors[0].span,
+            Span {
+                start_line: 1,
+                start_column: 6,
+                end_line: 1,
+                end_column: 6
+            }
+        );
+
+        lexer = Lexer::new("u1a *");
+        lexer.read_token();
+        assert_eq!(
+            lexer.errors[0].span,
+            Span {
+                start_line: 1,
+                start_column: 3,
+                end_line: 1,
+                end_column: 3
+            }
+        );
+
+        lexer = Lexer::new("\"\\x\"(");
+        lexer.read_token();
+        assert_eq!(
+            lexer.errors[0].span,
+            Span {
+                start_line: 1,
+                start_column: 2,
+                end_line: 1,
+                end_column: 3
+            }
+        );
+
+        lexer = Lexer::new("\"open");
+        lexer.read_token();
+        assert_eq!(
+            lexer.errors[0].span,
+            Span {
+                start_line: 1,
+                start_column: 1,
+                end_line: 1,
+                end_column: 5
+            }
+        );
+
+        lexer = Lexer::new("\" this is 👎!\"");
+        lexer.read_token();
+        assert_eq!(
+            lexer.errors[0].span,
+            Span {
+                start_line: 1,
+                start_column: 11,
+                end_line: 1,
+                end_column: 11
+            }
+        );
+
+        lexer = Lexer::new("\"\\u{1F600}\"");
+        lexer.read_token();
+        assert_eq!(
+            lexer.errors[0].span,
+            Span {
+                start_line: 1,
+                start_column: 2,
+                end_line: 1,
+                end_column: 3
+            }
+        );
+
+        lexer = Lexer::new("u\"\\x ok\"");
+        lexer.read_token();
+        assert_eq!(
+            lexer.errors[0].span,
+            Span {
+                start_line: 1,
+                start_column: 3,
+                end_line: 1,
+                end_column: 4
+            }
+        );
+
+        lexer = Lexer::new("u\"open");
+        lexer.read_token();
+        assert_eq!(
+            lexer.errors[0].span,
+            Span {
+                start_line: 1,
+                start_column: 1,
+                end_line: 1,
+                end_column: 7
+            }
+        );
+
+        lexer = Lexer::new("0xdefg");
+        lexer.read_token();
+        assert_eq!(
+            lexer.errors[0].span,
+            Span {
+                start_line: 1,
+                start_column: 6,
+                end_line: 1,
+                end_column: 6
+            }
+        );
+
+        lexer = Lexer::new("0xdef");
+        lexer.read_token();
+        assert_eq!(
+            lexer.errors[0].span,
+            Span {
+                start_line: 1,
+                start_column: 1,
+                end_line: 1,
+                end_column: 5
+            }
+        );
+
+        lexer = Lexer::new("0x00p5");
+        lexer.read_token();
+        assert_eq!(
+            lexer.errors[0].span,
+            Span {
+                start_line: 1,
+                start_column: 5,
+                end_line: 1,
+                end_column: 6
+            }
+        );
+
+        lexer = Lexer::new("baz👍buz");
+        lexer.read_token();
+        assert_eq!(
+            lexer.errors[0].span,
+            Span {
+                start_line: 1,
+                start_column: 4,
+                end_line: 1,
+                end_column: 7
+            }
+        );
+
+        lexer = Lexer::new("; this is not a comment");
+        lexer.read_token();
+        assert_eq!(
+            lexer.errors[0].span,
+            Span {
+                start_line: 1,
+                start_column: 1,
+                end_line: 1,
+                end_column: 1
+            }
+        );
+
+        lexer = Lexer::new("123 ~ abc");
+        lexer.read_token();
+        lexer.read_token();
+        lexer.read_token();
+        assert_eq!(
+            lexer.errors[0].span,
+            Span {
+                start_line: 1,
+                start_column: 5,
+                end_line: 1,
+                end_column: 5
             }
         );
     }
